@@ -167,16 +167,19 @@ class EmailCrawler:
         获取近期的邮件
 
         Args:
-            days: 天数，默认30天
+            days: 天数，默认30天。如果设置为0，则获取所有邮件（不限制时间）
 
         Returns:
             Dict[str, List[Tuple[str, object]]]: 按文件夹分组的邮件列表
         """
         try:
             # 计算日期范围
-            since_date = datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(days=days)
-
-            logger.info(f"搜索 {days} 天内的邮件 (从 {since_date.strftime('%Y-%m-%d')} 开始)")
+            if days == 0:
+                logger.info(f"搜索所有邮件（不限制时间）")
+                since_date = None
+            else:
+                since_date = datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(days=days)
+                logger.info(f"搜索 {days} 天内的邮件 (从 {since_date.strftime('%Y-%m-%d')} 开始)")
 
             folders = self.get_all_folders()
             all_emails = {}
@@ -198,8 +201,13 @@ class EmailCrawler:
 
                         # 获取文件夹中的邮件
                         try:
-                            # 过滤近期邮件
-                            items = folder_obj.filter(datetime_received__gte=since_date)
+                            # 根据days值决定是否过滤邮件
+                            if since_date is None:
+                                # days=0时，获取所有邮件
+                                items = folder_obj.all()
+                            else:
+                                # 过滤近期邮件
+                                items = folder_obj.filter(datetime_received__gte=since_date)
                             email_count = items.count()
                             
                             logger.info(f"在文件夹 {folder_name} 中找到 {email_count} 封邮件")
@@ -368,7 +376,7 @@ class EmailCrawler:
         运行爬虫程序
 
         Args:
-            days: 要获取的天数，默认30天
+            days: 要获取的天数，默认30天。如果设置为0，则获取所有邮件（不限制时间）
 
         Returns:
             bool: 是否成功
@@ -450,7 +458,10 @@ def main():
         
         print(f"邮箱地址: {email_config['email_address']}")
         print(f"Exchange服务器: {email_config.get('exchange_server', '自动发现')}")
-        print(f"获取天数: {days}天")
+        if days == 0:
+            print(f"获取范围: 所有邮件（不限制时间）")
+        else:
+            print(f"获取天数: {days}天")
 
         # 创建爬虫实例
         if "username" in email_config.keys():
@@ -475,7 +486,10 @@ def main():
         crawler.output_dir = key_output_dir
         os.makedirs(key_output_dir, exist_ok=True)
 
-        print(f"开始获取近 {days} 天的邮件...")
+        if days == 0:
+            print(f"开始获取所有邮件...")
+        else:
+            print(f"开始获取近 {days} 天的邮件...")
 
         success = crawler.run_crawler(days)
 
