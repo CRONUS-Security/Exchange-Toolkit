@@ -343,7 +343,7 @@ class EmailCrawler:
         # 替换不安全的字符
         unsafe_chars = ["/", "\\", ":", "*", "?", '"', "<", ">", "|"]
         for char in unsafe_chars:
-            folder_name = folder_name.replace(char, "_")
+            folder_name = folder_name.replace(char, "_").strip()
         return folder_name
 
     def _generate_filename(self, email_id: str, subject: str, email_datetime: datetime.datetime = None) -> str:
@@ -361,7 +361,7 @@ class EmailCrawler:
         # 清理主题中的不安全字符
         unsafe_chars = ["/", "\\", ":", "*", "?", '"', "<", ">", "|"]
         for char in unsafe_chars:
-            subject = subject.replace(char, "_")
+            subject = subject.replace(char, "_").strip()
 
         # 限制文件名长度
         if len(subject) > 100:
