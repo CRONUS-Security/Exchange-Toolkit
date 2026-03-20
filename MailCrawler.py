@@ -20,10 +20,10 @@ import re
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 # UUID Regex
-UUID_REGEX = re.compile(r'[0-9a-fA-F]{8}\b-[0-9a-fA-F]{4}\b-[0-9a-fA-F]{4}\b-[0-9a-fA-F]{4}\b-[0-9a-fA-F]{12}', re.IGNORECASE)
+UUID_REGEX = re.compile(r"[0-9a-fA-F]{8}\b-[0-9a-fA-F]{4}\b-[0-9a-fA-F]{4}\b-[0-9a-fA-F]{4}\b-[0-9a-fA-F]{12}", re.IGNORECASE)
 
 # Pure Integer Regex
-PURE_INTEGER_REGEX = re.compile(r'^\d+$')
+PURE_INTEGER_REGEX = re.compile(r"^\d+$")
 
 # 配置日志
 logging.basicConfig(
@@ -35,6 +35,34 @@ logger = logging.getLogger(__name__)
 
 CHECK_ONLY = False
 
+
+def load_config():
+    """加载配置文件"""
+    try:
+        # 尝试导入配置文件
+        sys.path.append(".")
+        from config import EMAIL_CONFIG, CRAWLER_CONFIG
+
+        print("=" * 50)
+        print("邮箱爬虫程序 - 配置版本")
+        print("=" * 50)
+
+        # 显示可用的配置
+        print("可用的邮箱配置:")
+        for key in EMAIL_CONFIG.keys():
+            print(f"  - {key}")
+
+        return EMAIL_CONFIG, CRAWLER_CONFIG
+
+    except ImportError:
+        print("❌ 配置文件 config.py 不存在！")
+        print("请先复制 config_example.py 为 config.py 并填入您的配置")
+        return None, None
+    except Exception as e:
+        print(f"❌ 加载配置时出错: {e}")
+        return None, None
+
+
 def check_folder_name(folder_name: str) -> bool:
     """
     检查文件夹名称是否有效
@@ -45,9 +73,9 @@ def check_folder_name(folder_name: str) -> bool:
     Returns:
         bool: 是否有效
     """
-    black_list=["System", "Versions"]
-    # 检查是否为UUID
-    if UUID_REGEX.fullmatch(folder_name):
+    black_list = ["System", "Versions"]
+    # 检查是否存在 UUID
+    if UUID_REGEX.search(folder_name):
         return False
     # 检查是否为纯数字
     if PURE_INTEGER_REGEX.fullmatch(folder_name):
@@ -59,7 +87,7 @@ def check_folder_name(folder_name: str) -> bool:
 
 
 class EmailCrawler:
-    def __init__(self, email_address: str, username:str|None, password: str, exchange_server: str = None, port: int = None):
+    def __init__(self, email_address: str, username: str | None, password: str, exchange_server: str = None, port: int = None):
         """
         初始化邮箱爬虫 - Exchange版本
 
@@ -89,43 +117,30 @@ class EmailCrawler:
         """
         try:
             logger.info(f"正在连接到Exchange服务器: {self.email_address}")
-            
+
             # 创建凭据
             if self.username:
                 credentials = Credentials(username=self.username, password=self.password)
             else:
                 credentials = Credentials(username=self.email_address, password=self.password)
-            
+
             # 禁用SSL验证（如果使用自签名证书）
             BaseProtocol.HTTP_ADAPTER_CLS = NoVerifyHTTPAdapter
-            
+
             if self.exchange_server:
                 # 如果提供了服务器地址，使用手动配置
-                config = Configuration(
-                    server=self.exchange_server,
-                    credentials=credentials,
-                    auth_type='NTLM'  # 或者使用 'basic'
-                )
-                self.account = Account(
-                    primary_smtp_address=self.email_address,
-                    config=config,
-                    autodiscover=False,
-                    access_type=DELEGATE
-                )
+                config = Configuration(server=self.exchange_server, credentials=credentials, auth_type="NTLM")  # 或者使用 'basic'
+                self.account = Account(primary_smtp_address=self.email_address, config=config, autodiscover=False, access_type=DELEGATE)
             else:
                 # 使用自动发现
-                self.account = Account(
-                    primary_smtp_address=self.email_address,
-                    credentials=credentials,
-                    autodiscover=True,
-                    access_type=DELEGATE
-                )
-            
+                self.account = Account(primary_smtp_address=self.email_address, credentials=credentials, autodiscover=True, access_type=DELEGATE)
+
             logger.info("Exchange连接成功")
             return True
         except Exception as e:
             logger.error(f"Exchange连接失败: {e}")
             import traceback
+
             logger.error(traceback.format_exc())
             return False
 
@@ -139,23 +154,23 @@ class EmailCrawler:
         try:
             logger.info("正在获取Exchange文件夹列表...")
             folder_list = []
-            
+
             # 递归获取所有文件夹
             def get_folders_recursive(folder):
                 try:
                     folder_name = folder.name
                     folder_list.append((folder, folder_name))
-                    
+
                     # 递归获取子文件夹
-                    if hasattr(folder, 'children') and folder.children:
+                    if hasattr(folder, "children") and folder.children:
                         for child in folder.children:
                             get_folders_recursive(child)
                 except Exception as e:
                     logger.warning(f"处理文件夹时出错: {e}")
-            
+
             # 从根文件夹开始
             get_folders_recursive(self.account.root)
-            
+
             logger.info(f"找到 {len(folder_list)} 个文件夹")
             return folder_list
         except Exception as e:
@@ -183,11 +198,11 @@ class EmailCrawler:
 
             folders = self.get_all_folders()
             all_emails = {}
-    
+
             # 使用 rich 进度条
             with Progress() as progress:
                 folders_task = progress.add_task("[green]文件夹遍历中...", total=len(folders))
-                
+
                 for folder_obj, folder_name in folders:
                     # 检查文件夹名称有效性
                     if not check_folder_name(folder_name):
@@ -209,11 +224,11 @@ class EmailCrawler:
                                 # 过滤近期邮件
                                 items = folder_obj.filter(datetime_received__gte=since_date)
                             email_count = items.count()
-                            
+
                             logger.info(f"在文件夹 {folder_name} 中找到 {email_count} 封邮件")
 
                             emails_in_folder = []
-                            
+
                             # 遍历邮件
                             with Progress() as progress:
                                 emails_task = progress.add_task(f"[cyan]处理邮件...", total=email_count)
@@ -248,6 +263,7 @@ class EmailCrawler:
         except Exception as e:
             logger.error(f"获取邮件时出错: {e}")
             import traceback
+
             logger.error(traceback.format_exc())
             return {}
 
@@ -262,10 +278,10 @@ class EmailCrawler:
             int: 成功保存的文件数量
         """
         saved_count = 0
-        
+
         # 计算总邮件数
         total_emails = sum(len(email_list) for email_list in emails.values())
-        
+
         if total_emails == 0:
             logger.info("没有邮件需要保存")
             return 0
@@ -283,11 +299,11 @@ class EmailCrawler:
                     try:
                         # 获取邮件主题
                         subject = item.subject if item.subject else "无主题"
-                        
+
                         # 截断主题用于显示
                         display_subject = subject[:40] + "..." if len(subject) > 40 else subject
                         progress.update(emails_task, current_info=f"[{folder}] {display_subject}")
-                        
+
                         # 获取邮件接收时间
                         email_datetime = item.datetime_received
 
@@ -302,7 +318,7 @@ class EmailCrawler:
 
                         logger.info(f"已保存: {filepath}")
                         saved_count += 1
-                        
+
                         # 更新进度
                         progress.update(emails_task, advance=1)
 
@@ -357,7 +373,7 @@ class EmailCrawler:
             timestamp = email_datetime.astimezone().strftime("%Y%m%d_%H%M%S")
         else:
             timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-        
+
         filename = f"{timestamp}_{email_id}_{subject}.eml"
 
         return filename
@@ -412,33 +428,6 @@ class EmailCrawler:
             self.disconnect()
 
 
-def load_config():
-    """加载配置文件"""
-    try:
-        # 尝试导入配置文件
-        sys.path.append(".")
-        from config import EMAIL_CONFIG, CRAWLER_CONFIG
-
-        print("=" * 50)
-        print("邮箱爬虫程序 - 配置版本")
-        print("=" * 50) 
-
-        # 显示可用的配置
-        print("可用的邮箱配置:")
-        for key in EMAIL_CONFIG.keys():
-            print(f"  - {key}")
-
-        return EMAIL_CONFIG, CRAWLER_CONFIG
-
-    except ImportError:
-        print("❌ 配置文件 config.py 不存在！")
-        print("请先复制 config_example.py 为 config.py 并填入您的配置")
-        return None, None
-    except Exception as e:
-        print(f"❌ 加载配置时出错: {e}")
-        return None, None
-
-
 def main():
     """主函数"""
     # 加载配置
@@ -455,7 +444,7 @@ def main():
         print(f"\n{'='*50}")
         print(f"正在处理: {key}")
         print(f"{'='*50}")
-        
+
         print(f"邮箱地址: {email_config['email_address']}")
         print(f"Exchange服务器: {email_config.get('exchange_server', '自动发现')}")
         if days == 0:
