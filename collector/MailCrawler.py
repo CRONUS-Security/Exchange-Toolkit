@@ -348,7 +348,7 @@ class EmailCrawler:
 
     def _generate_filename(self, email_id: str, subject: str, email_datetime: datetime.datetime = None) -> str:
         """
-        生成文件名
+        生成文件名 
 
         Args:
             email_id: 邮件ID
