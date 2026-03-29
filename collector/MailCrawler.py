@@ -12,9 +12,12 @@ from typing import List, Dict, Tuple
 from exchangelib import Credentials, Account, DELEGATE, Configuration, Version, Build
 from exchangelib.folders import FolderCollection
 from exchangelib.protocol import BaseProtocol, NoVerifyHTTPAdapter
+from exchangelib.protocol import Protocol, CachingProtocol
 import urllib3
 from rich.progress import Progress, SpinnerColumn, TextColumn, BarColumn, TaskProgressColumn, TimeRemainingColumn
 import re
+from requests_ntlm import HttpNtlmAuth
+from spnego._credential import NTLMHash
 
 # 禁用SSL警告（如果使用自签名证书）
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
@@ -34,6 +37,63 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 CHECK_ONLY = False
+
+
+def _parse_ntlm_hash(ntlm_hash_str: str) -> tuple[str, str | None]:
+    """
+    解析 NTLM 哈希字符串，返回十六进制字符串。
+
+    支持两种格式：
+      - 纯 NT 哈希（32 位十六进制）：lm_hash 返回 None
+      - LM:NT 格式：冒号分隔的两段哈希
+
+    Returns:
+        (nt_hash_hex, lm_hash_hex_or_None)
+    """
+    ntlm_hash_str = ntlm_hash_str.strip()
+    if ":" in ntlm_hash_str:
+        lm_part, nt_part = ntlm_hash_str.split(":", 1)
+        lm_part = lm_part.strip() or None
+        nt_part = nt_part.strip()
+    else:
+        lm_part = None
+        nt_part = ntlm_hash_str
+    return nt_part, lm_part
+
+
+class HttpNtlmHashAuth(HttpNtlmAuth):
+    """
+    NTLM Pass-the-Hash 认证。
+
+    基于 requests-ntlm + spnego.NTLMHash 凭据，将 NT/LM 哈希直接注入 NTLM 握手，
+    无需明文密码。protocol="ntlm" 确保使用纯 Python NTLM 实现而非 SSPI。
+    """
+
+    def __init__(self, username: str, nt_hash_hex: str, lm_hash_hex: str | None = None, send_cbt: bool = True):
+        # spnego.NTLMHash 接受十六进制字符串；username 应包含域名（DOMAIN\\user）
+        ntlm_cred = NTLMHash(username=username, nt_hash=nt_hash_hex, lm_hash=lm_hash_hex)
+        # 父类的 retry_using_http_NTLM_auth 将把 self.username 直接传给 spnego.client()
+        # 当 username 为 NTLMHash 凭据对象时，spnego 使用哈希而非密码进行认证
+        self.username = ntlm_cred
+        self.password = None
+        self.send_cbt = send_cbt
+        self.session_security = None
+
+
+class NTLMHashProtocol(Protocol):
+    """
+    exchangelib Protocol 子类，在 create_session() 中注入 HttpNtlmHashAuth。
+    """
+
+    def __init__(self, *args, ntlm_hash_auth: HttpNtlmHashAuth = None, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._ntlm_hash_auth = ntlm_hash_auth
+
+    def create_session(self):
+        session = super().create_session()
+        if self._ntlm_hash_auth is not None:
+            session.auth = self._ntlm_hash_auth
+        return session
 
 
 def load_config():
@@ -87,19 +147,31 @@ def check_folder_name(folder_name: str) -> bool:
 
 
 class EmailCrawler:
-    def __init__(self, email_address: str, username: str | None, password: str, exchange_server: str = None, port: int = None):
+    def __init__(
+        self,
+        email_address: str,
+        username: str | None,
+        password: str | None = None,
+        exchange_server: str = None,
+        port: int = None,
+        ntlm_hash: str | None = None,
+    ):
         """
         初始化邮箱爬虫 - Exchange版本
 
         Args:
             email_address: 邮箱地址
-            password: 邮箱密码
+            username: 用户名（哈希认证时需包含域名，如 DOMAIN\\username）
+            password: 邮箱密码（明文认证时使用）
             exchange_server: Exchange服务器地址（可选，会自动发现）
             port: Exchange端口（可选）
+            ntlm_hash: NTLM 哈希字符串，优先级高于 password。
+                       支持纯 NT 哈希（32 位十六进制）或 LM:NT 格式。
         """
         self.email_address = email_address
         self.username = username
         self.password = password
+        self.ntlm_hash = ntlm_hash
         self.exchange_server = exchange_server
         self.port = port
         self.account = None
@@ -118,22 +190,64 @@ class EmailCrawler:
         try:
             logger.info(f"正在连接到Exchange服务器: {self.email_address}")
 
-            # 创建凭据
-            if self.username:
-                credentials = Credentials(username=self.username, password=self.password)
-            else:
-                credentials = Credentials(username=self.email_address, password=self.password)
-
             # 禁用SSL验证（如果使用自签名证书）
             BaseProtocol.HTTP_ADAPTER_CLS = NoVerifyHTTPAdapter
 
-            if self.exchange_server:
-                # 如果提供了服务器地址，使用手动配置
-                config = Configuration(server=self.exchange_server, credentials=credentials, auth_type="NTLM")  # 或者使用 'basic'
-                self.account = Account(primary_smtp_address=self.email_address, config=config, autodiscover=False, access_type=DELEGATE)
+            if self.ntlm_hash:
+                # --- NTLM 哈希认证（Pass-the-Hash）路径 ---
+                logger.info("使用 NTLM 哈希认证（Pass-the-Hash）")
+
+                raw_username = self.username or self.email_address
+
+                # 解析哈希（返回十六进制字符串）
+                nt_hash_hex, lm_hash_hex = _parse_ntlm_hash(self.ntlm_hash)
+
+                # 构建哈希认证对象（使用完整 DOMAIN\\username 作为 spnego 凭据的 username）
+                hash_auth = HttpNtlmHashAuth(
+                    username=raw_username,
+                    nt_hash_hex=nt_hash_hex,
+                    lm_hash_hex=lm_hash_hex,
+                )
+
+                if not self.exchange_server:
+                    raise ValueError("NTLM 哈希认证必须手动指定 exchange_server，不支持自动发现")
+
+                # exchangelib 要求 Credentials，传入占位符（实际认证由 hash_auth 接管）
+                credentials = Credentials(username=raw_username, password="placeholder_unused")
+                config = Configuration(
+                    server=self.exchange_server,
+                    credentials=credentials,
+                    auth_type="NTLM",
+                )
+                # Account 内部固定创建 Protocol(config=config)，不接受外部 protocol 参数。
+                # 先正常创建 Account（此时 CachingProtocol 缓存了原始 Protocol 实例），
+                # 然后删除该缓存条目，再创建 NTLMHashProtocol（cache miss → 真正实例化），
+                # 最后替换 account.protocol，确保在任何 EWS 请求发出前完成替换。
+                self.account = Account(
+                    primary_smtp_address=self.email_address,
+                    config=config,
+                    autodiscover=False,
+                    access_type=DELEGATE,
+                )
+                # 删除 CachingProtocol 中的缓存条目，使下一次 NTLMHashProtocol(config=...) 触发真实实例化
+                del Protocol[config]
+                self.account.protocol = NTLMHashProtocol(
+                    config=config,
+                    ntlm_hash_auth=hash_auth,
+                )
             else:
-                # 使用自动发现
-                self.account = Account(primary_smtp_address=self.email_address, credentials=credentials, autodiscover=True, access_type=DELEGATE)
+                # --- 明文密码认证路径（保持原有逻辑）---
+                logger.info("使用明文密码认证")
+                if self.username:
+                    credentials = Credentials(username=self.username, password=self.password)
+                else:
+                    credentials = Credentials(username=self.email_address, password=self.password)
+
+                if self.exchange_server:
+                    config = Configuration(server=self.exchange_server, credentials=credentials, auth_type="NTLM")  # 或者使用 'basic'
+                    self.account = Account(primary_smtp_address=self.email_address, config=config, autodiscover=False, access_type=DELEGATE)
+                else:
+                    self.account = Account(primary_smtp_address=self.email_address, credentials=credentials, autodiscover=True, access_type=DELEGATE)
 
             logger.info("Exchange连接成功")
             return True
@@ -452,23 +566,22 @@ def main():
         else:
             print(f"获取天数: {days}天")
 
-        # 创建爬虫实例
-        if "username" in email_config.keys():
-            crawler = EmailCrawler(
-                email_address=email_config["email_address"],
-                username=email_config["username"],
-                password=email_config["password"],
-                exchange_server=email_config.get("exchange_server"),
-                port=email_config.get("port"),
-            )
+        # 判断认证模式
+        use_ntlm_hash = "ntlm_hash" in email_config and email_config["ntlm_hash"]
+        if use_ntlm_hash:
+            print(f"认证方式: NTLM 哈希认证（Pass-the-Hash）")
         else:
-            crawler = EmailCrawler(
-                email_address=email_config["email_address"],
-                username=None,
-                password=email_config["password"],
-                exchange_server=email_config.get("exchange_server"),
-                port=email_config.get("port"),
-            )
+            print(f"认证方式: 明文密码认证")
+
+        # 创建爬虫实例
+        crawler = EmailCrawler(
+            email_address=email_config["email_address"],
+            username=email_config.get("username"),
+            password=email_config.get("password"),
+            exchange_server=email_config.get("exchange_server"),
+            port=email_config.get("port"),
+            ntlm_hash=email_config.get("ntlm_hash"),
+        )
 
         # 设置输出目录为以key命名的子文件夹
         key_output_dir = os.path.join("exports", key)

@@ -16,11 +16,18 @@ EMAIL_CONFIG = {
         "password": "password1", 
         "exchange_server": exchange_server
     },
-    "user2@example.com": {
-        "email_address": "user2@example.com", 
-        "password": "password2", 
-        "username":"admin123",  # 可选，默认使用邮箱地址作为用户名
-        "exchange_server": exchange_server
+    
+    # NTLM 哈希认证示例（Pass-the-Hash）
+    # 当客户安全策略不允许提供明文密码时使用
+    # username 需包含域名，格式为 "DOMAIN\\username"
+    # ntlm_hash 支持两种格式：
+    #   - 纯 NT 哈希：32位十六进制字符串，如 "8846f7eaee8fb117ad06bdd830b7586c"
+    #   - LM:NT 格式：两段哈希以冒号分隔，如 "aad3b435b51404eeaad3b435b51404ee:8846f7eaee8fb117ad06bdd830b7586c"
+    "user3@example.com": {
+        "email_address": "user3@example.com",
+        "username": "DOMAIN\\user3",          # 必须包含域名前缀
+        "ntlm_hash": "8846f7eaee8fb117ad06bdd830b7586c",  # 或 "LMhash:NThash"
+        "exchange_server": exchange_server,
     },
 }
 
