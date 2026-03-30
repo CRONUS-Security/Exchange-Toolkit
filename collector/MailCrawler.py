@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-使用配置文件运行邮箱爬虫程序 - Exchange版本
+Mail Crawler - Exchange Version
 """
 
 import os
@@ -19,7 +19,7 @@ import re
 from requests_ntlm import HttpNtlmAuth
 from spnego._credential import NTLMHash
 
-# 禁用SSL警告（如果使用自签名证书）
+# disable InsecureRequestWarning when connecting to servers with self-signed certificates
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 # UUID Regex
@@ -28,7 +28,7 @@ UUID_REGEX = re.compile(r"[0-9a-fA-F]{8}\b-[0-9a-fA-F]{4}\b-[0-9a-fA-F]{4}\b-[0-
 # Pure Integer Regex
 PURE_INTEGER_REGEX = re.compile(r"^\d+$")
 
-# 配置日志
+# setup logging
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s - %(levelname)s - %(message)s",
@@ -41,11 +41,11 @@ CHECK_ONLY = False
 
 def _parse_ntlm_hash(ntlm_hash_str: str) -> tuple[str, str | None]:
     """
-    解析 NTLM 哈希字符串，返回十六进制字符串。
+    parse NTLM hash string into NT and LM components.
 
-    支持两种格式：
-      - 纯 NT 哈希（32 位十六进制）：lm_hash 返回 None
-      - LM:NT 格式：冒号分隔的两段哈希
+    Supports two formats:
+      - Pure NT hash (32 hex characters): lm_hash returns None
+      - LM:NT format: colon-separated two-part hash
 
     Returns:
         (nt_hash_hex, lm_hash_hex_or_None)
@@ -63,17 +63,17 @@ def _parse_ntlm_hash(ntlm_hash_str: str) -> tuple[str, str | None]:
 
 class HttpNtlmHashAuth(HttpNtlmAuth):
     """
-    NTLM Pass-the-Hash 认证。
+    NTLM Pass-the-Hash authentication.
 
-    基于 requests-ntlm + spnego.NTLMHash 凭据，将 NT/LM 哈希直接注入 NTLM 握手，
-    无需明文密码。protocol="ntlm" 确保使用纯 Python NTLM 实现而非 SSPI。
+    Based on requests-ntlm + spnego.NTLMHash credentials, injects NT/LM hashes directly into the NTLM handshake,
+    without requiring a plaintext password. protocol="ntlm" ensures the use of pure Python NTLM implementation instead of SSPI.
     """
 
     def __init__(self, username: str, nt_hash_hex: str, lm_hash_hex: str | None = None, send_cbt: bool = True):
-        # spnego.NTLMHash 接受十六进制字符串；username 应包含域名（DOMAIN\\user）
+        # spnego.NTLMHash accepts hexadecimal strings; username should include the domain (DOMAIN\\user)
         ntlm_cred = NTLMHash(username=username, nt_hash=nt_hash_hex, lm_hash=lm_hash_hex)
-        # 父类的 retry_using_http_NTLM_auth 将把 self.username 直接传给 spnego.client()
-        # 当 username 为 NTLMHash 凭据对象时，spnego 使用哈希而非密码进行认证
+        # The parent class's retry_using_http_NTLM_auth will pass self.username directly to spnego.client()
+        # When username is an NTLMHash credential object, spnego uses the hash instead of a password for authentication
         self.username = ntlm_cred
         self.password = None
         self.send_cbt = send_cbt
@@ -82,7 +82,7 @@ class HttpNtlmHashAuth(HttpNtlmAuth):
 
 class NTLMHashProtocol(Protocol):
     """
-    exchangelib Protocol 子类，在 create_session() 中注入 HttpNtlmHashAuth。
+    exchangelib Protocol subclass that injects HttpNtlmHashAuth into create_session().
     """
 
     def __init__(self, *args, ntlm_hash_auth: HttpNtlmHashAuth = None, **kwargs):
@@ -97,50 +97,50 @@ class NTLMHashProtocol(Protocol):
 
 
 def load_config():
-    """加载配置文件"""
+    """Load configuration file"""
     try:
-        # 尝试导入配置文件
+        # Try to import the configuration file
         sys.path.append(".")
         from config import EMAIL_CONFIG, CRAWLER_CONFIG
 
         print("=" * 50)
-        print("邮箱爬虫程序 - 配置版本")
+        print("Mail Crawler - Exchange Version")
         print("=" * 50)
 
-        # 显示可用的配置
-        print("可用的邮箱配置:")
+        # Display available configurations
+        print("Available email configurations:")
         for key in EMAIL_CONFIG.keys():
             print(f"  - {key}")
 
         return EMAIL_CONFIG, CRAWLER_CONFIG
 
     except ImportError:
-        print("❌ 配置文件 config.py 不存在！")
-        print("请先复制 config_example.py 为 config.py 并填入您的配置")
+        print("❌ Configuration file config.py does not exist!")
+        print("Please copy config_example.py to config.py and fill in your configuration")
         return None, None
     except Exception as e:
-        print(f"❌ 加载配置时出错: {e}")
+        print(f"❌ Error loading configuration: {e}")
         return None, None
 
 
 def check_folder_name(folder_name: str) -> bool:
     """
-    检查文件夹名称是否有效
+    Check if the folder name is valid
 
     Args:
-        folder_name: 文件夹名称
+        folder_name: Folder name
 
     Returns:
-        bool: 是否有效
+        bool: Whether the folder name is valid
     """
     black_list = ["System", "Versions"]
-    # 检查是否存在 UUID
+    # Check if UUID exists
     if UUID_REGEX.search(folder_name):
         return False
-    # 检查是否为纯数字
+    # Check if it is a pure integer
     if PURE_INTEGER_REGEX.fullmatch(folder_name):
         return False
-    # 检查是否在黑名单中
+    # Check if it is in the blacklist
     if folder_name in black_list:
         return False
     return True
@@ -157,16 +157,16 @@ class EmailCrawler:
         ntlm_hash: str | None = None,
     ):
         """
-        初始化邮箱爬虫 - Exchange版本
+        Initialize the email crawler - Exchange version
 
         Args:
-            email_address: 邮箱地址
-            username: 用户名（哈希认证时需包含域名，如 DOMAIN\\username）
-            password: 邮箱密码（明文认证时使用）
-            exchange_server: Exchange服务器地址（可选，会自动发现）
-            port: Exchange端口（可选）
-            ntlm_hash: NTLM 哈希字符串，优先级高于 password。
-                       支持纯 NT 哈希（32 位十六进制）或 LM:NT 格式。
+            email_address: Email address
+            username: Username (must include domain for hash authentication, e.g., DOMAIN\\username)
+            password: Email password (used for plaintext authentication)
+            exchange_server: Exchange server address (optional, autodiscover will be used if not provided)
+            port: Exchange port (optional)
+            ntlm_hash: NTLM hash string, takes precedence over password.
+                       Supports pure NT hash (32 hexadecimal characters) or LM:NT format.
         """
         self.email_address = email_address
         self.username = username
@@ -177,32 +177,32 @@ class EmailCrawler:
         self.account = None
         self.output_dir = "exports"
 
-        # 创建输出目录
+        # Create output directory
         os.makedirs(self.output_dir, exist_ok=True)
 
     def connect(self) -> bool:
         """
-        连接到Exchange服务器
+        Connect to the Exchange server
 
         Returns:
-            bool: 连接是否成功
+            bool: Whether the connection was successful
         """
         try:
-            logger.info(f"正在连接到Exchange服务器: {self.email_address}")
+            logger.info(f"Connecting to Exchange server: {self.email_address}")
 
-            # 禁用SSL验证（如果使用自签名证书）
+            # Disable SSL verification (if using self-signed certificates)
             BaseProtocol.HTTP_ADAPTER_CLS = NoVerifyHTTPAdapter
 
             if self.ntlm_hash:
-                # --- NTLM 哈希认证（Pass-the-Hash）路径 ---
-                logger.info("使用 NTLM 哈希认证（Pass-the-Hash）")
+                # --- NTLM Hash Authentication (Pass-the-Hash) Path ---
+                logger.info("Using NTLM Hash Authentication (Pass-the-Hash)")
 
                 raw_username = self.username or self.email_address
 
-                # 解析哈希（返回十六进制字符串）
+                # Parse the hash (returns hexadecimal strings)
                 nt_hash_hex, lm_hash_hex = _parse_ntlm_hash(self.ntlm_hash)
 
-                # 构建哈希认证对象（使用完整 DOMAIN\\username 作为 spnego 凭据的 username）
+                # Construct the hash authentication object (using full DOMAIN\\username as the spnego credential username)
                 hash_auth = HttpNtlmHashAuth(
                     username=raw_username,
                     nt_hash_hex=nt_hash_hex,
@@ -210,49 +210,49 @@ class EmailCrawler:
                 )
 
                 if not self.exchange_server:
-                    raise ValueError("NTLM 哈希认证必须手动指定 exchange_server，不支持自动发现")
+                    raise ValueError("NTLM hash authentication requires manual specification of exchange_server, autodiscover is not supported")
 
-                # exchangelib 要求 Credentials，传入占位符（实际认证由 hash_auth 接管）
+                # exchangelib requires Credentials, pass a placeholder (actual authentication is handled by hash_auth)
                 credentials = Credentials(username=raw_username, password="placeholder_unused")
                 config = Configuration(
                     server=self.exchange_server,
                     credentials=credentials,
                     auth_type="NTLM",
                 )
-                # Account 内部固定创建 Protocol(config=config)，不接受外部 protocol 参数。
-                # 先正常创建 Account（此时 CachingProtocol 缓存了原始 Protocol 实例），
-                # 然后删除该缓存条目，再创建 NTLMHashProtocol（cache miss → 真正实例化），
-                # 最后替换 account.protocol，确保在任何 EWS 请求发出前完成替换。
+                # Account internally creates Protocol(config=config) and does not accept an external protocol parameter.
+                # First, create the Account normally (at this point, CachingProtocol caches the original Protocol instance),
+                # then delete the cache entry, create NTLMHashProtocol (cache miss → actual instantiation),
+                # and finally replace account.protocol to ensure the replacement is done before any EWS requests are made.
                 self.account = Account(
                     primary_smtp_address=self.email_address,
                     config=config,
                     autodiscover=False,
                     access_type=DELEGATE,
                 )
-                # 删除 CachingProtocol 中的缓存条目，使下一次 NTLMHashProtocol(config=...) 触发真实实例化
+                # Delete the cache entry in CachingProtocol to trigger actual instantiation of NTLMHashProtocol(config=...)
                 del Protocol[config]
                 self.account.protocol = NTLMHashProtocol(
                     config=config,
                     ntlm_hash_auth=hash_auth,
                 )
             else:
-                # --- 明文密码认证路径（保持原有逻辑）---
-                logger.info("使用明文密码认证")
+                # --- Plain Password Authentication Path (keep original logic)---
+                logger.info("Using plain password authentication")
                 if self.username:
                     credentials = Credentials(username=self.username, password=self.password)
                 else:
                     credentials = Credentials(username=self.email_address, password=self.password)
 
                 if self.exchange_server:
-                    config = Configuration(server=self.exchange_server, credentials=credentials, auth_type="NTLM")  # 或者使用 'basic'
+                    config = Configuration(server=self.exchange_server, credentials=credentials, auth_type="NTLM")
                     self.account = Account(primary_smtp_address=self.email_address, config=config, autodiscover=False, access_type=DELEGATE)
                 else:
                     self.account = Account(primary_smtp_address=self.email_address, credentials=credentials, autodiscover=True, access_type=DELEGATE)
 
-            logger.info("Exchange连接成功")
+            logger.info("Exchange connection successful")
             return True
         except Exception as e:
-            logger.error(f"Exchange连接失败: {e}")
+            logger.error(f"Exchange connection failed: {e}")
             import traceback
 
             logger.error(traceback.format_exc())
@@ -260,99 +260,99 @@ class EmailCrawler:
 
     def get_all_folders(self) -> List[Tuple[str, str]]:
         """
-        获取所有邮箱文件夹
+        Get all mailbox folders
 
         Returns:
-            List[Tuple[str, str]]: 文件夹列表，元组格式为 (文件夹对象, 文件夹名称)
+            List[Tuple[str, str]]: List of folders, tuple format is (folder object, folder name)
         """
         try:
-            logger.info("正在获取Exchange文件夹列表...")
+            logger.info("Fetching Exchange folder list...")
             folder_list = []
 
-            # 递归获取所有文件夹
+            # Recursively get all folders
             def get_folders_recursive(folder):
                 try:
                     folder_name = folder.name
                     folder_list.append((folder, folder_name))
 
-                    # 递归获取子文件夹
+                    # Recursively get child folders
                     if hasattr(folder, "children") and folder.children:
                         for child in folder.children:
                             get_folders_recursive(child)
                 except Exception as e:
-                    logger.warning(f"处理文件夹时出错: {e}")
+                    logger.warning(f"Error processing folder: {e}")
 
-            # 从根文件夹开始
+            # Start from the root folder
             get_folders_recursive(self.account.root)
 
-            logger.info(f"找到 {len(folder_list)} 个文件夹")
+            logger.info(f"Found {len(folder_list)} folders")
             return folder_list
         except Exception as e:
-            logger.error(f"获取文件夹列表时出错: {e}")
+            logger.error(f"Error fetching folder list: {e}")
             return []
 
     def get_recent_emails(self, days: int = 30) -> Dict[str, List[Tuple[str, object]]]:
         """
-        获取近期的邮件
+        Get recent emails
 
         Args:
-            days: 天数，默认30天。如果设置为0，则获取所有邮件（不限制时间）
+            days: Number of days, default is 30. If set to 0, fetch all emails (no time limit).
 
         Returns:
-            Dict[str, List[Tuple[str, object]]]: 按文件夹分组的邮件列表
+            Dict[str, List[Tuple[str, object]]]: Emails grouped by folder
         """
         try:
-            # 计算日期范围
+            # Calculate date range
             if days == 0:
-                logger.info(f"搜索所有邮件（不限制时间）")
+                logger.info(f"Fetching all emails (no time limit)")
                 since_date = None
             else:
                 since_date = datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(days=days)
-                logger.info(f"搜索 {days} 天内的邮件 (从 {since_date.strftime('%Y-%m-%d')} 开始)")
+                logger.info(f"Fetching emails from the last {days} days (since {since_date.strftime('%Y-%m-%d')})")
 
             folders = self.get_all_folders()
             all_emails = {}
 
-            # 使用 rich 进度条
+            # Using rich progress bar
             with Progress() as progress:
-                folders_task = progress.add_task("[green]文件夹遍历中...", total=len(folders))
+                folders_task = progress.add_task("[green]Traversing folders...", total=len(folders))
 
                 for folder_obj, folder_name in folders:
-                    # 检查文件夹名称有效性
+                    # Check folder name validity
                     if not check_folder_name(folder_name):
-                        logger.info(f"跳过无效文件夹: {folder_name}")
+                        logger.info(f"Skipping invalid folder: {folder_name}")
                         progress.update(folders_task, advance=1)
                         continue
                     try:
-                        # 更新进度条显示当前文件夹
+                        # Update progress bar with current folder
                         progress.update(folders_task, folder_name=f"[{folder_name}]")
-                        logger.info(f"正在处理文件夹: {folder_name}")
+                        logger.info(f"Processing folder: {folder_name}")
 
-                        # 获取文件夹中的邮件
+                        # Get emails in the folder
                         try:
-                            # 根据days值决定是否过滤邮件
+                            # Decide whether to filter emails based on days value
                             if since_date is None:
-                                # days=0时，获取所有邮件
+                                # If days=0, get all emails
                                 items = folder_obj.all()
                             else:
-                                # 过滤近期邮件
+                                # Filter recent emails
                                 items = folder_obj.filter(datetime_received__gte=since_date)
                             email_count = items.count()
 
-                            logger.info(f"在文件夹 {folder_name} 中找到 {email_count} 封邮件")
+                            logger.info(f"Found {email_count} emails in folder {folder_name}")
 
                             emails_in_folder = []
 
-                            # 遍历邮件
+                            # Iterate through emails
                             with Progress() as progress:
-                                emails_task = progress.add_task(f"[cyan]处理邮件...", total=email_count)
+                                emails_task = progress.add_task(f"[cyan]Processing emails...", total=email_count)
                                 for idx, item in enumerate(items):
                                     try:
-                                        # 保存邮件对象和ID
+                                        # Save email object and ID
                                         email_id = f"{idx+1}"
                                         emails_in_folder.append((email_id, item))
                                     except Exception as e:
-                                        logger.error(f"处理邮件时出错: {e}")
+                                        logger.error(f"Error processing email: {e}")
                                         continue
                                     finally:
                                         progress.update(emails_task, advance=1)
@@ -360,7 +360,7 @@ class EmailCrawler:
                             all_emails[folder_name] = emails_in_folder
 
                         except Exception as e:
-                            logger.warning(f"文件夹 {folder_name} 不支持邮件操作或为空: {e}")
+                            logger.warning(f"Folder {folder_name} does not support email operations or is empty: {e}")
                             progress.update(folders_task, advance=1)
                             continue
 
@@ -368,14 +368,14 @@ class EmailCrawler:
                         progress.update(folders_task, advance=1)
 
                     except Exception as e:
-                        logger.error(f"处理文件夹 {folder_name} 时出错: {e}")
+                        logger.error(f"Error processing folder {folder_name}: {e}")
                         progress.update(folders_task, advance=1)
                         continue
 
             return all_emails
 
         except Exception as e:
-            logger.error(f"获取邮件时出错: {e}")
+            logger.error(f"Error fetching emails: {e}")
             import traceback
 
             logger.error(traceback.format_exc())
@@ -383,62 +383,62 @@ class EmailCrawler:
 
     def save_eml_files(self, emails: Dict[str, List[Tuple[str, object]]]) -> int:
         """
-        将邮件保存为eml文件
+        Save emails as eml files
 
         Args:
-            emails: 邮件数据
+            emails: Email data
 
         Returns:
-            int: 成功保存的文件数量
+            int: Number of successfully saved files
         """
         saved_count = 0
 
-        # 计算总邮件数
+        # Calculate total number of emails
         total_emails = sum(len(email_list) for email_list in emails.values())
 
         if total_emails == 0:
-            logger.info("没有邮件需要保存")
+            logger.info("No emails to save")
             return 0
 
-        # 使用 rich 进度条
+        # Use rich progress bar
         with Progress() as progress:
-            emails_task = progress.add_task("[green]保存邮件...", total=total_emails)
+            emails_task = progress.add_task("[green]Saving emails...", total=total_emails)
 
             for folder, email_list in emails.items():
-                # 创建文件夹对应的目录
+                # Create directory corresponding to the folder
                 folder_dir = os.path.join(self.output_dir, self._sanitize_folder_name(folder))
                 os.makedirs(folder_dir, exist_ok=True)
 
                 for email_id, item in email_list:
                     try:
-                        # 获取邮件主题
-                        subject = item.subject if item.subject else "无主题"
+                        # Get email subject
+                        subject = item.subject if item.subject else "No Subject"
 
-                        # 截断主题用于显示
+                        # Truncate subject for display
                         display_subject = subject[:40] + "..." if len(subject) > 40 else subject
                         progress.update(emails_task, current_info=f"[{folder}] {display_subject}")
 
-                        # 获取邮件接收时间
+                        # Get email received time
                         email_datetime = item.datetime_received
 
-                        # 生成文件名
+                        # Generate filename
                         filename = self._generate_filename(email_id, subject, email_datetime)
                         filepath = os.path.join(folder_dir, filename)
 
-                        # 获取MIME内容并保存为eml文件
+                        # Get MIME content and save as eml file
                         mime_content = item.mime_content
                         with open(filepath, "wb") as f:
                             f.write(mime_content)
 
-                        logger.info(f"已保存: {filepath}")
+                        logger.info(f"Saved: {filepath}")
                         saved_count += 1
 
-                        # 更新进度
+                        # Update progress
                         progress.update(emails_task, advance=1)
 
                     except Exception as e:
-                        logger.error(f"保存邮件 {email_id} 时出错: {e}")
-                        # 即使出错也要更新进度
+                        logger.error(f"Error saving email {email_id}: {e}")
+                        # Update progress even if an error occurs
                         progress.update(emails_task, advance=1)
                         continue
 
@@ -446,15 +446,15 @@ class EmailCrawler:
 
     def _sanitize_folder_name(self, folder_name: str) -> str:
         """
-        清理文件夹名称，使其适合作为目录名
+        Sanitize folder name to make it suitable as a directory name
 
         Args:
-            folder_name: 原始文件夹名称
+            folder_name: Original folder name
 
         Returns:
-            str: 清理后的文件夹名称
+            str: Sanitized folder name
         """
-        # 替换不安全的字符
+        # Replace unsafe characters
         unsafe_chars = ["/", "\\", ":", "*", "?", '"', "<", ">", "|"]
         for char in unsafe_chars:
             folder_name = folder_name.replace(char, "_").strip()
@@ -462,28 +462,28 @@ class EmailCrawler:
 
     def _generate_filename(self, email_id: str, subject: str, email_datetime: datetime.datetime = None) -> str:
         """
-        生成文件名 
+        Generate filename
 
         Args:
-            email_id: 邮件ID
-            subject: 邮件主题
-            email_datetime: 邮件的接收时间
+            email_id: Email ID
+            subject: Email subject
+            email_datetime: Email received time
 
         Returns:
-            str: 文件名
+            str: Filename
         """
-        # 清理主题中的不安全字符
+        # Sanitize subject to remove unsafe characters
         unsafe_chars = ["/", "\\", ":", "*", "?", '"', "<", ">", "|"]
         for char in unsafe_chars:
             subject = subject.replace(char, "_").strip()
 
-        # 限制文件名长度
+        # Limit filename length
         if len(subject) > 100:
             subject = subject[:100] + "..."
 
-        # 使用邮件的接收时间，如果没有则使用当前时间
+        # Use email received time, if not available use current time
         if email_datetime:
-            # 转换为本地时间
+            # Convert to local time
             timestamp = email_datetime.astimezone().strftime("%Y%m%d_%H%M%S")
         else:
             timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -493,58 +493,58 @@ class EmailCrawler:
         return filename
 
     def disconnect(self):
-        """断开邮箱连接"""
+        """Disconnect from the Exchange server"""
         if self.account:
             try:
-                logger.info("Exchange连接已关闭")
+                logger.info("Exchange connection closed")
                 self.account = None
             except Exception as e:
-                logger.error(f"关闭Exchange连接时出错: {e}")
+                logger.error(f"Error closing Exchange connection: {e}")
 
     def run_crawler(self, days: int = 30) -> bool:
         """
-        运行爬虫程序
+        Run the crawler
 
         Args:
-            days: 要获取的天数，默认30天。如果设置为0，则获取所有邮件（不限制时间）
+            days: Number of days to fetch, default is 30. If set to 0, fetch all emails (no time limit)
 
         Returns:
-            bool: 是否成功
+            bool: Whether the crawler ran successfully
         """
         try:
-            # 连接邮箱
+            # Connect to the mailbox
             if not self.connect():
                 return False
             if CHECK_ONLY:
-                logger.info("仅检查连接成功，未进行邮件下载。")
+                logger.info("Only checking connection, not downloading emails.")
                 return True
 
-            # 获取邮件
+            # Fetch emails
             emails = self.get_recent_emails(days)
 
             if not emails:
-                logger.warning("没有找到符合条件的邮件")
+                logger.warning("No emails found matching the criteria")
                 return True
 
             total_emails = sum(len(email_list) for email_list in emails.values())
-            logger.info(f"总共找到 {total_emails} 封邮件")
+            logger.info(f"Total emails found: {total_emails}")
 
-            # 保存邮件
+            # Save emails
             saved_count = self.save_eml_files(emails)
-            logger.info(f"成功保存 {saved_count} 封邮件到 {self.output_dir} 目录")
+            logger.info(f"Successfully saved {saved_count} emails to {self.output_dir} directory")
 
             return True
 
         except Exception as e:
-            logger.error(f"运行爬虫程序时出错: {e}")
+            logger.error(f"Error running crawler: {e}")
             return False
         finally:
             self.disconnect()
 
 
 def main():
-    """主函数"""
-    # 加载配置
+    """Main function"""
+    # Load configuration
     email_configs, crawler_config = load_config()
 
     if not email_configs or not crawler_config:
@@ -553,27 +553,27 @@ def main():
     days = crawler_config.get("days", 30)
     total_saved = 0
 
-    # 遍历所有邮箱配置
+    # Iterate through all email configurations
     for key, email_config in email_configs.items():
         print(f"\n{'='*50}")
-        print(f"正在处理: {key}")
+        print(f"Processing: {key}")
         print(f"{'='*50}")
 
-        print(f"邮箱地址: {email_config['email_address']}")
-        print(f"Exchange服务器: {email_config.get('exchange_server', '自动发现')}")
+        print(f"Email address: {email_config['email_address']}")
+        print(f"Exchange server: {email_config.get('exchange_server', 'Auto-discover')}")
         if days == 0:
-            print(f"获取范围: 所有邮件（不限制时间）")
+            print(f"Fetch range: All emails (no time limit)")
         else:
-            print(f"获取天数: {days}天")
+            print(f"Fetch days: {days} days")
 
-        # 判断认证模式
+        # Determine authentication mode
         use_ntlm_hash = "ntlm_hash" in email_config and email_config["ntlm_hash"]
         if use_ntlm_hash:
-            print(f"认证方式: NTLM 哈希认证（Pass-the-Hash）")
+            print(f"Authentication mode: NTLM hash authentication (Pass-the-Hash)")
         else:
-            print(f"认证方式: 明文密码认证")
+            print(f"Authentication mode: Plain text password")
 
-        # 创建爬虫实例
+        # Create crawler instance
         crawler = EmailCrawler(
             email_address=email_config["email_address"],
             username=email_config.get("username"),
@@ -583,26 +583,26 @@ def main():
             ntlm_hash=email_config.get("ntlm_hash"),
         )
 
-        # 设置输出目录为以key命名的子文件夹
+        # Set output directory as a subfolder named after the key
         key_output_dir = os.path.join("exports", key)
         crawler.output_dir = key_output_dir
         os.makedirs(key_output_dir, exist_ok=True)
 
         if days == 0:
-            print(f"开始获取所有邮件...")
+            print(f"Fetching all emails...")
         else:
-            print(f"开始获取近 {days} 天的邮件...")
+            print(f"Fetching emails from the past {days} days...")
 
         success = crawler.run_crawler(days)
 
         if success:
-            print(f"✅ {key} 邮件导出完成！")
-            print(f"邮件已保存到: {key_output_dir} 目录")
+            print(f"✅ {key} emails exported successfully!")
+            print(f"Emails saved to: {key_output_dir} directory")
         else:
-            print(f"❌ {key} 邮件导出失败，请检查日志文件: email_crawler.log")
+            print(f"❌ {key} email export failed, please check the log file: email_crawler.log")
 
     print(f"\n{'='*50}")
-    print("所有邮箱处理完成！")
+    print("All mailboxes processed!")
     print(f"{'='*50}")
 
 
