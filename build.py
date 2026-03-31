@@ -26,8 +26,8 @@ def build():
         # "--windows-icon-from-ico=icon.ico",  # Uncomment if you have an icon file
         
         # Include necessary packages (resolve dynamic imports for rich)
-        # "--include-package=rich",
-        # "--include-package=rich._unicode_data",
+        "--include-package=rich",
+        "--include-package=rich._unicode_data",
         "--include-package-data=rich",
         
         # Include other core packages
@@ -43,7 +43,7 @@ def build():
         # "--include-data-dir=models=models",
         
         # Optimization options
-        # "--assume-yes-for-downloads",
+        "--assume-yes-for-downloads",
         # "--show-progress",
         # "--show-memory",
         
