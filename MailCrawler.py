@@ -4,11 +4,14 @@
 Mail Crawler - Exchange Version
 """
 
+import json
 import os
 import sys
 import logging
 import datetime
-from typing import List, Dict, Tuple
+from pathlib import Path
+from typing import List, Dict, Optional, Tuple
+import typer
 from exchangelib import Credentials, Account, DELEGATE, Configuration, Version, Build
 from exchangelib.folders import FolderCollection
 from exchangelib.protocol import BaseProtocol, NoVerifyHTTPAdapter
@@ -28,15 +31,8 @@ UUID_REGEX = re.compile(r"[0-9a-fA-F]{8}\b-[0-9a-fA-F]{4}\b-[0-9a-fA-F]{4}\b-[0-
 # Pure Integer Regex
 PURE_INTEGER_REGEX = re.compile(r"^\d+$")
 
-# setup logging
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s - %(levelname)s - %(message)s",
-    handlers=[logging.FileHandler("email_crawler.log", encoding="utf-8"), logging.StreamHandler()],
-)
+# setup logging (handlers will be reconfigured once config is loaded)
 logger = logging.getLogger(__name__)
-
-CHECK_ONLY = False
 
 
 def _parse_ntlm_hash(ntlm_hash_str: str) -> tuple[str, str | None]:
@@ -96,31 +92,50 @@ class NTLMHashProtocol(Protocol):
         return session
 
 
-def load_config():
-    """Load configuration file"""
+app = typer.Typer(
+    name="mailcrawler",
+    help="Mail Crawler - Exchange邮件爬虫工具",
+    no_args_is_help=True,
+)
+
+_DEFAULT_CONFIG = Path("config.json")
+
+
+def _resolve_config_path(config: Optional[Path]) -> Path:
+    """解析配置文件路径，打包为EXE时默认使用可执行文件同目录下的 config.json"""
+    if config is not None:
+        return config
+    if getattr(sys, "frozen", False):
+        return Path(sys.executable).parent / "config.json"
+    return _DEFAULT_CONFIG
+
+
+def _setup_logging(log_file: str) -> None:
+    """根据配置初始化日志处理器"""
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s - %(levelname)s - %(message)s",
+        handlers=[
+            logging.FileHandler(log_file, encoding="utf-8"),
+            logging.StreamHandler(),
+        ],
+    )
+
+
+def load_config_json(config_path: Path) -> tuple[dict, dict]:
+    """从 JSON 文件加载配置"""
+    if not config_path.exists():
+        typer.echo(f"❌ 配置文件 {config_path} 不存在！", err=True)
+        raise typer.Exit(1)
     try:
-        # Try to import the configuration file
-        sys.path.append(".")
-        from config import EMAIL_CONFIG, CRAWLER_CONFIG
-
-        print("=" * 50)
-        print("Mail Crawler - Exchange Version")
-        print("=" * 50)
-
-        # Display available configurations
-        print("Available email configurations:")
-        for key in EMAIL_CONFIG.keys():
-            print(f"  - {key}")
-
-        return EMAIL_CONFIG, CRAWLER_CONFIG
-
-    except ImportError:
-        print("❌ Configuration file config.py does not exist!")
-        print("Please copy config_example.py to config.py and fill in your configuration")
-        return None, None
-    except Exception as e:
-        print(f"❌ Error loading configuration: {e}")
-        return None, None
+        with open(config_path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        accounts = {k: v for k, v in data.get("accounts", {}).items() if not k.startswith("_")}
+        crawler = data.get("crawler", {})
+        return accounts, crawler
+    except json.JSONDecodeError as e:
+        typer.echo(f"❌ 配置文件格式错误: {e}", err=True)
+        raise typer.Exit(1)
 
 
 def check_folder_name(folder_name: str) -> bool:
@@ -514,9 +529,6 @@ class EmailCrawler:
             # Connect to the mailbox
             if not self.connect():
                 return False
-            if CHECK_ONLY:
-                logger.info("Only checking connection, not downloading emails.")
-                return True
 
             # Fetch emails
             emails = self.get_recent_emails(days)
@@ -541,69 +553,143 @@ class EmailCrawler:
             self.disconnect()
 
 
-def main():
-    """Main function"""
-    # Load configuration
-    email_configs, crawler_config = load_config()
+def _run_account(key: str, email_config: dict, days: int, base_output_dir: str, check_only: bool) -> bool:
+    """对单个账户执行爬取（或连接检查）"""
+    typer.echo(f"\n{'='*50}")
+    typer.echo(f"处理账户: {key}")
+    typer.echo(f"{'='*50}")
 
-    if not email_configs or not crawler_config:
-        return
+    typer.echo(f"邮箱地址: {email_config['email_address']}")
+    typer.echo(f"Exchange服务器: {email_config.get('exchange_server', '自动发现')}")
+    if days == 0:
+        typer.echo("获取范围: 全部邮件（不限时间）")
+    else:
+        typer.echo(f"获取天数: 最近 {days} 天")
 
-    days = crawler_config.get("days", 30)
-    total_saved = 0
+    use_ntlm_hash = bool(email_config.get("ntlm_hash"))
+    auth_mode = "NTLM哈希认证（Pass-the-Hash）" if use_ntlm_hash else "明文密码认证"
+    typer.echo(f"认证方式: {auth_mode}")
 
-    # Iterate through all email configurations
-    for key, email_config in email_configs.items():
-        print(f"\n{'='*50}")
-        print(f"Processing: {key}")
-        print(f"{'='*50}")
+    crawler = EmailCrawler(
+        email_address=email_config["email_address"],
+        username=email_config.get("username"),
+        password=email_config.get("password"),
+        exchange_server=email_config.get("exchange_server"),
+        port=email_config.get("port"),
+        ntlm_hash=email_config.get("ntlm_hash"),
+    )
 
-        print(f"Email address: {email_config['email_address']}")
-        print(f"Exchange server: {email_config.get('exchange_server', 'Auto-discover')}")
-        if days == 0:
-            print(f"Fetch range: All emails (no time limit)")
+    key_output_dir = os.path.join(base_output_dir, key)
+    crawler.output_dir = key_output_dir
+    os.makedirs(key_output_dir, exist_ok=True)
+
+    if check_only:
+        ok = crawler.connect()
+        crawler.disconnect()
+        if ok:
+            typer.echo(f"✅ {key} 连接成功！")
         else:
-            print(f"Fetch days: {days} days")
-
-        # Determine authentication mode
-        use_ntlm_hash = "ntlm_hash" in email_config and email_config["ntlm_hash"]
-        if use_ntlm_hash:
-            print(f"Authentication mode: NTLM hash authentication (Pass-the-Hash)")
-        else:
-            print(f"Authentication mode: Plain text password")
-
-        # Create crawler instance
-        crawler = EmailCrawler(
-            email_address=email_config["email_address"],
-            username=email_config.get("username"),
-            password=email_config.get("password"),
-            exchange_server=email_config.get("exchange_server"),
-            port=email_config.get("port"),
-            ntlm_hash=email_config.get("ntlm_hash"),
-        )
-
-        # Set output directory as a subfolder named after the key
-        key_output_dir = os.path.join("exports", key)
-        crawler.output_dir = key_output_dir
-        os.makedirs(key_output_dir, exist_ok=True)
-
-        if days == 0:
-            print(f"Fetching all emails...")
-        else:
-            print(f"Fetching emails from the past {days} days...")
-
+            typer.echo(f"❌ {key} 连接失败，请检查日志。")
+        return ok
+    else:
         success = crawler.run_crawler(days)
-
         if success:
-            print(f"✅ {key} emails exported successfully!")
-            print(f"Emails saved to: {key_output_dir} directory")
+            typer.echo(f"✅ {key} 邮件导出成功！")
+            typer.echo(f"邮件已保存至: {key_output_dir}")
         else:
-            print(f"❌ {key} email export failed, please check the log file: email_crawler.log")
+            typer.echo(f"❌ {key} 邮件导出失败，请检查日志。")
+        return success
 
-    print(f"\n{'='*50}")
-    print("All mailboxes processed!")
-    print(f"{'='*50}")
+
+@app.command()
+def run(
+    accounts: Optional[List[str]] = typer.Argument(None, help="要处理的邮箱地址（不指定则处理全部）"),
+    days: Optional[int] = typer.Option(None, "--days", "-d", help="获取最近N天的邮件，0表示不限时间"),
+    output_dir: Optional[str] = typer.Option(None, "--output-dir", "-o", help="邮件输出根目录"),
+    config: Optional[Path] = typer.Option(None, "--config", "-c", help="配置文件路径（默认: config.json）"),
+    check_only: bool = typer.Option(False, "--check-only", help="仅检查连接，不下载邮件"),
+):
+    """下载邮件并保存为 EML 文件"""
+    config_path = _resolve_config_path(config)
+    email_configs, crawler_config = load_config_json(config_path)
+
+    log_file = crawler_config.get("log_file", "email_crawler.log")
+    _setup_logging(log_file)
+
+    effective_days = days if days is not None else crawler_config.get("days", 30)
+    effective_output = output_dir or crawler_config.get("output_dir", "eml_exports")
+
+    typer.echo("=" * 50)
+    typer.echo("Mail Crawler - Exchange Version")
+    typer.echo("=" * 50)
+    typer.echo(f"配置文件: {config_path}")
+    typer.echo(f"已配置账户: {', '.join(email_configs.keys())}")
+
+    targets = accounts if accounts else list(email_configs.keys())
+    unknown = [a for a in targets if a not in email_configs]
+    if unknown:
+        typer.echo(f"❌ 以下账户在配置文件中不存在: {', '.join(unknown)}", err=True)
+        raise typer.Exit(1)
+
+    for key in targets:
+        _run_account(key, email_configs[key], effective_days, effective_output, check_only)
+
+    typer.echo(f"\n{'='*50}")
+    typer.echo("全部账户处理完毕！")
+    typer.echo(f"{'='*50}")
+
+
+@app.command("list")
+def list_accounts(
+    config: Optional[Path] = typer.Option(None, "--config", "-c", help="配置文件路径（默认: config.json）"),
+):
+    """列出配置文件中所有已配置的邮箱账户"""
+    config_path = _resolve_config_path(config)
+    email_configs, crawler_config = load_config_json(config_path)
+
+    typer.echo(f"配置文件: {config_path}")
+    typer.echo(f"\n共 {len(email_configs)} 个账户:\n")
+    for key, cfg in email_configs.items():
+        auth = "NTLM哈希" if cfg.get("ntlm_hash") else "明文密码"
+        server = cfg.get("exchange_server", "（自动发现）")
+        typer.echo(f"  [{key}]")
+        typer.echo(f"    邮箱地址  : {cfg.get('email_address', key)}")
+        typer.echo(f"    服务器    : {server}")
+        typer.echo(f"    认证方式  : {auth}")
+        if cfg.get("username"):
+            typer.echo(f"    用户名    : {cfg['username']}")
+
+
+@app.command()
+def check(
+    accounts: Optional[List[str]] = typer.Argument(None, help="要检查的邮箱地址（不指定则检查全部）"),
+    config: Optional[Path] = typer.Option(None, "--config", "-c", help="配置文件路径（默认: config.json）"),
+):
+    """检查邮箱连接是否正常（不下载邮件）"""
+    config_path = _resolve_config_path(config)
+    email_configs, crawler_config = load_config_json(config_path)
+
+    log_file = crawler_config.get("log_file", "email_crawler.log")
+    _setup_logging(log_file)
+
+    targets = accounts if accounts else list(email_configs.keys())
+    unknown = [a for a in targets if a not in email_configs]
+    if unknown:
+        typer.echo(f"❌ 以下账户在配置文件中不存在: {', '.join(unknown)}", err=True)
+        raise typer.Exit(1)
+
+    results = {}
+    for key in targets:
+        ok = _run_account(key, email_configs[key], 0, ".", check_only=True)
+        results[key] = ok
+
+    typer.echo(f"\n{'='*50}")
+    typer.echo("连接检查结果汇总:")
+    for key, ok in results.items():
+        status = "✅ 成功" if ok else "❌ 失败"
+        typer.echo(f"  {key}: {status}")
+    typer.echo("=" * 50)
 
 
 if __name__ == "__main__":
-    main()
+    app()
