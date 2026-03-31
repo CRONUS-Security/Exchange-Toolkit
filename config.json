@@ -1,0 +1,22 @@
+{
+    "_comment": "Exchange邮件爬虫配置文件",
+    "crawler": {
+        "days": 3,
+        "output_dir": "eml_exports",
+        "log_file": "email_crawler.log"
+    },
+    "accounts": {
+        "user1@example.com": {
+            "email_address": "user1@example.com",
+            "password": "password1",
+            "exchange_server": "owa.example.com"
+        },
+        "user3@example.com": {
+            "_comment": "NTLM哈希认证示例（Pass-the-Hash）。username需包含域名，格式为 DOMAIN\\username。ntlm_hash支持纯NT哈希（32位十六进制）或 LM:NT 格式。",
+            "email_address": "user3@example.com",
+            "username": "DOMAIN\\user3",
+            "ntlm_hash": "8846f7eaee8fb117ad06bdd830b7586c",
+            "exchange_server": "owa.example.com"
+        }
+    }
+}
