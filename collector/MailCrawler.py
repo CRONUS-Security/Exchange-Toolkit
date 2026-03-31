@@ -44,8 +44,8 @@ def _parse_ntlm_hash(ntlm_hash_str: str) -> tuple[str, str | None]:
     parse NTLM hash string into NT and LM components.
 
     Supports two formats:
-      - Pure NT hash (32 hex characters): lm_hash returns None
-      - LM:NT format: colon-separated two-part hash
+        - Pure NT hash (32 hex characters): lm_hash returns None
+        - LM:NT format: colon-separated two-part hash
 
     Returns:
         (nt_hash_hex, lm_hash_hex_or_None)
@@ -165,8 +165,7 @@ class EmailCrawler:
             password: Email password (used for plaintext authentication)
             exchange_server: Exchange server address (optional, autodiscover will be used if not provided)
             port: Exchange port (optional)
-            ntlm_hash: NTLM hash string, takes precedence over password.
-                       Supports pure NT hash (32 hexadecimal characters) or LM:NT format.
+            ntlm_hash: NTLM hash string, takes precedence over password. Supports pure NT hash (32 hexadecimal characters) or LM:NT format.
         """
         self.email_address = email_address
         self.username = username
