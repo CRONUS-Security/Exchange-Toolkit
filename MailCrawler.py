@@ -581,7 +581,8 @@ def _run_account(key: str, email_config: dict, days: int, base_output_dir: str, 
 
     key_output_dir = os.path.join(base_output_dir, key)
     crawler.output_dir = key_output_dir
-    os.makedirs(key_output_dir, exist_ok=True)
+    if not check_only:
+        os.makedirs(key_output_dir, exist_ok=True)
 
     if check_only:
         ok = crawler.connect()
@@ -678,9 +679,11 @@ def check(
         typer.echo(f"❌ 以下账户在配置文件中不存在: {', '.join(unknown)}", err=True)
         raise typer.Exit(1)
 
+    effective_output = crawler_config.get("output_dir", "eml_exports")
+
     results = {}
     for key in targets:
-        ok = _run_account(key, email_configs[key], 0, ".", check_only=True)
+        ok = _run_account(key, email_configs[key], 0, effective_output, check_only=True)
         results[key] = ok
 
     typer.echo(f"\n{'='*50}")
