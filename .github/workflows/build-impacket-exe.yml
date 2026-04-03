@@ -16,7 +16,7 @@ jobs:
 
         steps:
             - name: Checkout current repository
-              uses: actions/checkout@v4
+              uses: actions/checkout@v6
 
             - name: Setup Python
               uses: actions/setup-python@v6
@@ -31,13 +31,13 @@ jobs:
                   python -m pip install nuitka ordered-set zstandard
 
             - name: Cache Nuitka depends.exe
-              uses: actions/cache@v4
+              uses: actions/cache@v5
               with:
                   path: ~\AppData\Local\Nuitka\Nuitka\Cache\downloads\depends
                   key: nuitka-depends-x86_64
 
             - name: Cache Nuitka bytecode
-              uses: actions/cache@v4
+              uses: actions/cache@v5
               with:
                   path: ~\AppData\Local\Nuitka\Nuitka\Cache\bytecode
                   key: nuitka-bytecode-py3.12
@@ -50,7 +50,7 @@ jobs:
                   python build.py
 
             - name: Upload EXE artifact
-              uses: actions/upload-artifact@v4
+              uses: actions/upload-artifact@v7
               with:
                   name: MailCrawler-exe
                   path: .\build\MailCrawler.exe
@@ -64,7 +64,7 @@ jobs:
 
         steps:
             - name: Download build artifact
-              uses: actions/download-artifact@v4
+              uses: actions/download-artifact@v8
               with:
                   pattern: MailCrawler-exe
                   path: release-assets
