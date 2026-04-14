@@ -114,6 +114,7 @@ class EmailCrawler:
         exchange_server: str = None,
         port: int = None,
         ntlm_hash: str | None = None,
+        output_dir: str = "exports",
     ):
         """
         Initialize the email crawler - Exchange version
@@ -125,6 +126,7 @@ class EmailCrawler:
             exchange_server: Exchange server address (optional, autodiscover will be used if not provided)
             port: Exchange port (optional)
             ntlm_hash: NTLM hash string, takes precedence over password. Supports pure NT hash (32 hexadecimal characters) or LM:NT format.
+            output_dir: Root directory for exported email files
         """
         self.email_address = email_address
         self.username = username
@@ -133,7 +135,7 @@ class EmailCrawler:
         self.exchange_server = exchange_server
         self.port = port
         self.account = None
-        self.output_dir = "exports"
+        self.output_dir = output_dir
 
     def connect(self) -> bool:
         """
@@ -514,6 +516,8 @@ def _run_account(key: str, email_config: dict, days: int, base_output_dir: str, 
     auth_mode = "NTLM hash authentication (Pass-the-Hash)" if use_ntlm_hash else "Plain password authentication"
     typer.echo(f"Authentication mode: {auth_mode}")
 
+    key_output_dir = os.path.join(base_output_dir, key)
+
     crawler = EmailCrawler(
         email_address=email_config["email_address"],
         username=email_config.get("username"),
@@ -521,10 +525,8 @@ def _run_account(key: str, email_config: dict, days: int, base_output_dir: str, 
         exchange_server=email_config.get("exchange_server"),
         port=email_config.get("port"),
         ntlm_hash=email_config.get("ntlm_hash"),
+        output_dir=key_output_dir,
     )
-
-    key_output_dir = os.path.join(base_output_dir, key)
-    crawler.output_dir = key_output_dir
     if not check_only:
         os.makedirs(key_output_dir, exist_ok=True)
 
