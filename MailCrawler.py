@@ -135,9 +135,6 @@ class EmailCrawler:
         self.account = None
         self.output_dir = "exports"
 
-        # Create output directory
-        os.makedirs(self.output_dir, exist_ok=True)
-
     def connect(self) -> bool:
         """
         Connect to the Exchange server
@@ -357,6 +354,9 @@ class EmailCrawler:
         if total_emails == 0:
             logger.info("No emails to save")
             return 0
+
+        # Create the resolved output directory only when emails are actually being saved
+        os.makedirs(self.output_dir, exist_ok=True)
 
         # Use rich progress bar
         with Progress() as progress:
