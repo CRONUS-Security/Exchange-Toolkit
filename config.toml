@@ -1,0 +1,60 @@
+# MailCrawler Configuration
+
+[crawler]
+# Number of days to look back. Set to 0 to dump all emails with no time limit.
+days = 3
+output_dir = "eml_exports"
+log_file   = "email_crawler.log"
+
+# ---------------------------------------------------------------------------
+# [admin] — used by: enum-mailboxes / grant-access / grant-impersonation
+# ---------------------------------------------------------------------------
+[admin]
+username        = "DOMAIN\\admin"
+password        = "P@ssw0rd"
+exchange_server = "mail.example.com"
+# Optional overrides (shown with defaults):
+# ssl        = true
+# ssl_verify = false
+# auth       = "negotiate"   # negotiate (default) / ntlm / basic / kerberos
+
+# ---------------------------------------------------------------------------
+# [accounts.*] — one table per crawl target
+#
+# Scheme A — Delegate + FullAccess
+#   Prerequisites: run `grant-access` first, then crawl with admin creds
+#                  targeting the victim mailbox.
+# ---------------------------------------------------------------------------
+["accounts"."victim@example.com"]
+email_address   = "victim@example.com"
+username        = "DOMAIN\\admin"
+password        = "P@ssw0rd"
+exchange_server = "mail.example.com"
+# access_type defaults to "delegate" when omitted
+
+# ---------------------------------------------------------------------------
+# Scheme B — EWS Impersonation (batch, no ACL modification)
+#   Prerequisites: run `grant-impersonation` to assign ApplicationImpersonation
+#                  role to the admin account.
+# ---------------------------------------------------------------------------
+["accounts"."admin_impersonation"]
+# Credentials belong to the ADMIN account.
+email_address   = "admin@example.com"
+username        = "DOMAIN\\admin"
+password        = "P@ssw0rd"
+exchange_server = "mail.example.com"
+access_type     = "impersonation"
+# Inline target list — OR use targets_file (one address per line)
+targets         = ["user1@example.com", "user2@example.com"]
+# targets_file  = "mailboxes.txt"
+
+# ---------------------------------------------------------------------------
+# Scheme C — Pass-the-Hash (PTH) using NTLM hash from NTDS
+#   Use `gen-config` to auto-generate entries like this one.
+# ---------------------------------------------------------------------------
+["accounts"."user3@example.com"]
+email_address   = "user3@example.com"
+username        = "DOMAIN\\user3"
+# ntlm_hash accepts pure NT hash (32 hex chars) or LM:NT format
+ntlm_hash       = "8846f7eaee8fb117ad06bdd830b7586c"
+exchange_server = "owa.example.com"
